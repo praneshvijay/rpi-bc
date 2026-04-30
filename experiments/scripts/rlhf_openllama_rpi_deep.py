@@ -155,6 +155,8 @@ def main(
     rank_model = AutoModelForSequenceClassification.from_pretrained(
         "weqweasdas/hh_rlhf_rm_open_llama_3b", **rm_kwargs
     )
+    rank_model.eval()
+    rank_model.requires_grad_(False)
     rank_tokenizer = LlamaTokenizer.from_pretrained(
         "weqweasdas/hh_rlhf_rm_open_llama_3b", use_fast=False
     )

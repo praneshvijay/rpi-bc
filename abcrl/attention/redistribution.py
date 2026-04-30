@@ -135,7 +135,7 @@ def _compute_attention_gradients(model, inputs, attention_probabilities):
         
     logits = out.logits
     total = (logits[:, 1] - logits[:, 0]).sum()
-    total.backward(retain_graph=True)
+    total.backward()
     
     gradients = attention_probabilities.grad.detach()
     attention_probabilities.requires_grad = False
@@ -274,7 +274,7 @@ def _compute_attention_gradients_multilayer(model, inputs, attn_probs_list):
 
     logits = out.logits
     total = (logits[:, 1] - logits[:, 0]).sum()
-    total.backward(retain_graph=True)
+    total.backward()
 
     # GradCAM-style weighting: weight each layer by the L1 norm of its gradient
     grads = []
@@ -446,7 +446,7 @@ def _compute_attention_gradients_multilayer_gptj(model, inputs, attn_probs_list)
         total = logits.squeeze(-1).sum()
     else:
         total = (logits[:, 1] - logits[:, 0]).sum()
-    total.backward(retain_graph=True)
+    total.backward()
 
     grads, weights = [], []
     for ap in req_grads:
@@ -672,7 +672,7 @@ def _compute_attention_gradients_multilayer_llama(model, inputs, attn_probs_list
         total = logits.squeeze(-1).sum()
     else:
         total = (logits[:, 1] - logits[:, 0]).sum()
-    total.backward(retain_graph=True)
+    total.backward()
 
     grads = []
     weights = []

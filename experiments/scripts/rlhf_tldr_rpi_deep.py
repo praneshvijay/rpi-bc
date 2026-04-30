@@ -177,6 +177,8 @@ def main(
         rank_model = AutoPeftModelForSequenceClassification.from_pretrained(
             "Holarissun/trl_rm_tldr_gptj", **rm_kwargs
         ).to("cuda:0")
+    rank_model.eval()
+    rank_model.requires_grad_(False)
     rank_tokenizer = AutoTokenizer.from_pretrained("Holarissun/trl_rm_tldr_gptj")
     rank_tokenizer.pad_token = rank_tokenizer.eos_token
     rank_model.config.pad_token_id = rank_model.config.eos_token_id
