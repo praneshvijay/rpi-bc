@@ -6,7 +6,7 @@ GPU: T4 x2 | Estimated time: 5-8 hours
 import subprocess, sys, os
 
 # ── CRITICAL: Uninstall Kaggle's pre-installed peft first, then install compatible versions ──
-subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", "peft", "trl", "transformers", "accelerate"])
+subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", "peft", "trl", "transformers", "accelerate", "diffusers"])
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "--no-cache-dir",
     "transformers==4.38.2", "peft==0.8.2", "trl==0.7.11",
     "accelerate==0.27.2", "bitsandbytes", "datasets==2.15.0",
