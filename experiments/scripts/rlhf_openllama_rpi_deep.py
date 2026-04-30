@@ -103,7 +103,11 @@ def main(
     dataset = dataset.shuffle()
 
     logger.info(f"Dataset length: {len(dataset)}")
-    logger.debug(dataset[0])
+    if logger.isEnabledFor(logging.DEBUG):
+        try:
+            logger.debug(dataset[0])
+        except (ValueError, Exception):
+            logger.debug("(could not display first sample)")
 
     load_dotenv()
     wandb_entity = os.getenv("WANDB_ENTITY")
