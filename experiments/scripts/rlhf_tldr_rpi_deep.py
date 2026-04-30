@@ -146,10 +146,15 @@ def main(
         peft_config=lora_config,
         quantization_config=nf4_config,
     )
-    ref_model = AutoModelForCausalLMWithValueHead.from_pretrained(
-        config.model_name,
-        quantization_config=nf4_config,
-    )
+    if not reward_model_8bit:
+        # On cluster (plenty of VRAM) keep explicit ref model
+        ref_model = AutoModelForCausalLMWithValueHead.from_pretrained(
+            config.model_name,
+            quantization_config=nf4_config,
+        )
+    else:
+        # On Kaggle T4: skip ref model — PEFT auto-creates one by disabling adapter
+        ref_model = None
 
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)
     tokenizer.pad_token = tokenizer.eos_token
@@ -162,7 +167,9 @@ def main(
         attn_implementation="eager",
     )
     if reward_model_8bit:
-        rm_kwargs["load_in_8bit"] = True
+        # Load in fp16 to halve VRAM (12GB vs 24GB fp32)
+        rm_kwargs["torch_dtype"] = torch.float16
+        rm_kwargs["device_map"] = "auto"
         rank_model = AutoPeftModelForSequenceClassification.from_pretrained(
             "Holarissun/trl_rm_tldr_gptj", **rm_kwargs
         )

@@ -133,10 +133,15 @@ def main(
         peft_config=lora_config,
         quantization_config=nf4_config,
     )
-    ref_model = AutoModelForCausalLMWithValueHead.from_pretrained(
-        config.model_name, 
-        quantization_config=nf4_config,
-    )
+    if not reward_model_half:
+        # On cluster (plenty of VRAM) keep explicit ref model
+        ref_model = AutoModelForCausalLMWithValueHead.from_pretrained(
+            config.model_name, 
+            quantization_config=nf4_config,
+        )
+    else:
+        # On Kaggle T4: skip ref model — PEFT auto-creates one by disabling adapter
+        ref_model = None
     tokenizer = LlamaTokenizer.from_pretrained(config.model_name, use_fast=False)
 
     rm_kwargs = dict(
