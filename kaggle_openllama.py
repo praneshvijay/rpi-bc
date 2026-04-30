@@ -9,8 +9,8 @@ import subprocess, sys, os
 subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", "peft", "trl", "transformers", "accelerate", "diffusers"])
 subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "--no-cache-dir",
     "transformers==4.38.2", "peft==0.8.2", "trl==0.7.11",
-    "accelerate==0.27.2", "bitsandbytes", "datasets==2.15.0",
-    "numpy<2.0", "wandb", "python-dotenv"])
+    "accelerate==0.27.2", "bitsandbytes", "datasets>=2.20.0",
+    "wandb", "python-dotenv"])
 
 # ── Clone repo ──────────────────────────────────────────────
 if not os.path.exists("/kaggle/working/rpi-bc"):
