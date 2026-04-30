@@ -5,7 +5,10 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           BitsAndBytesConfig, TrainingArguments)
 from trl import DataCollatorForCompletionOnlyLM, SFTTrainer
 
-dataset = load_dataset("openai/summarize_from_feedback", "comparisons", split="train")
+try:
+    dataset = load_dataset("openai/summarize_from_feedback", "comparisons", split="train", trust_remote_code=True)
+except ValueError:
+    dataset = load_dataset("openai/summarize_from_feedback", "comparisons", split="train")
 
 
 lora_config = LoraConfig(

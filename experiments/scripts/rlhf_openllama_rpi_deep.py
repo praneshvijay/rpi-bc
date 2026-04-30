@@ -6,63 +6,20 @@ import time
 
 import numpy as np
 import torch
-from datasets import load_dataset
 from dotenv import load_dotenv
-from peft import AutoPeftModelForSequenceClassification, LoraConfig
+from peft import LoraConfig
 from pkg_resources import resource_filename
 from tqdm import tqdm
-from transformers import AutoTokenizer, BitsAndBytesConfig, set_seed
+from transformers import (AutoModelForSequenceClassification,
+                          BitsAndBytesConfig, LlamaTokenizer, set_seed)
 from trl import AutoModelForCausalLMWithValueHead, PPOConfig
-from trl.core import LengthSampler
 
 import wandb
 from abcrl.attention.redistribution import (
-    get_attention_distribution, get_generator_attention_distribution)
+    get_attention_distribution, get_generator_attention_distribution,
+    get_rpi_deep_attention_distribution_batch_llama)
+from abcrl.datasets import build_anthropic_dataset, collator
 from abcrl.rl.ppo import PPOTrainerABC
-
-
-def build_tldr_dataset(
-    config,
-    dataset_name="openai/summarize_from_feedback",
-):
-    """
-    Build dataset for training.
-
-    Args:
-        dataset_name (`str`):
-            The name of the dataset to be loaded.
-
-    Returns:
-        dataloader (`torch.utils.data.DataLoader`):
-            The dataloader for the dataset.
-    """
-    tokenizer = AutoTokenizer.from_pretrained(config.model_name)
-
-    try:
-        ds = load_dataset(dataset_name, "comparisons", split="train", trust_remote_code=True)
-    except ValueError:
-        ds = load_dataset(dataset_name, "comparisons", split="train")
-
-    def tokenize(sample):
-        _, post, _, _ = (
-            sample["choice"],
-            sample["info"]["post"],
-            sample["summaries"][0]["text"],
-            sample["summaries"][1]["text"],
-        )
-        query = f"### Text to Summarize: {post}\n ### Summary: "
-        sample["input_ids"] = tokenizer.encode(query)
-        sample["query"] = tokenizer.decode(sample["input_ids"])
-        return sample
-
-    ds = ds.map(tokenize, batched=False)
-    ds = ds.filter(lambda x: len(x["input_ids"]) < 450, batched=False)
-    ds.set_format(type="torch")
-    return ds
-
-
-def collator(data):
-    return dict((key, [d[key] for d in data]) for key in data[0])
 
 
 def main(
@@ -70,24 +27,35 @@ def main(
     max_epochs: int = 50,
     beta: float = 0.5,
     l_rate: float = 1.41e-5,
-    min_generation: int = 8,
-    max_generation: int = 16,
-    project_name: str = "rlhf-tldr",
-    batch_size: int = 16,
-    seed: int = 41310,
     lora_rank: int = 32,
     lora_alpha: int = 32,
     lora_dropout: float = 0.0,
+    min_generation: int = 8,
+    max_generation: int = 16,
+    ppo_epochs: int = 10,
+    use_score_scaling: bool = False,
+    use_score_nomalization: bool = False,
+    repetition_penalty: float = 1.0,
+    max_instruction_length: int = 256,
+    project_name: str = "rlhf",
+    batch_size: int = 16,
+    mini_batch_size: int = 1,
+    seed: int = 41310,
     logging_level: str = "DEBUG",
+    rpi_time_steps: int = 5,
+    rpi_num_interpolation: int = 5,
+    rpi_num_samples: int = 1,
 ):
-    assert method in ["rlhf", "abc", "abcde", "abcde2", "uniform"]
-
     now = datetime.datetime.now()
     date_time = now.strftime("%Y%m%d_%H%M")
 
-    run_name = f"{method}_{int(beta*100)}_{min_generation}_{max_generation}_{date_time}"
+    if "rpi" in method:
+        run_name = f"{method}_T{rpi_time_steps}_K{rpi_num_interpolation}_S{rpi_num_samples}_Lall_{int(beta*100)}_{min_generation}_{max_generation}_{date_time}"
+    else:
+        run_name = f"{method}_{int(beta*100)}_{min_generation}_{max_generation}_{date_time}"
 
     print(f"Run name: {run_name}")
+
     BASE_PATH = resource_filename("abcrl", "/..")
 
     logger = logging.getLogger(__name__)
@@ -111,22 +79,29 @@ def main(
     logger.addHandler(c_handler)
     logger.addHandler(f_handler)
 
+    assert method in ["rlhf", "abc", "abcde", "abcde2", "uniform", "rpibc_deep"]
+
     if seed is not None:
         print(f"Setting seed to {seed}")
         set_seed(seed)
 
     config = PPOConfig(
-        model_name="XanderJC/gptj-sft-tldr-merged",
+        model_name="VMware/open-llama-7b-open-instruct",
         learning_rate=l_rate,
         log_with="wandb",
-        ppo_epochs=4,
+        ppo_epochs=ppo_epochs,
         batch_size=batch_size,
         optimize_device_cache=True,
-        seed=seed,
+        remove_unused_columns=False,
+        mini_batch_size=mini_batch_size,
+        use_score_scaling=use_score_scaling,
+        use_score_norm=use_score_nomalization,
     )
+    logger.info(f"PPO Config: {config}")
 
-    dataset = build_tldr_dataset(config)
+    dataset = build_anthropic_dataset(config, max_instruction_length)
     dataset = dataset.shuffle()
+
     logger.info(f"Dataset length: {len(dataset)}")
     logger.debug(dataset[0])
 
@@ -152,29 +127,25 @@ def main(
         config.model_name,
         peft_config=lora_config,
         quantization_config=nf4_config,
-        trust_remote_code=True,
-    ).to("cuda:0")
+    )
     ref_model = AutoModelForCausalLMWithValueHead.from_pretrained(
-        config.model_name,
+        config.model_name, 
         quantization_config=nf4_config,
-        trust_remote_code=True,
-    ).to("cuda:0")
+    )
+    tokenizer = LlamaTokenizer.from_pretrained(config.model_name, use_fast=False)
 
-    tokenizer = AutoTokenizer.from_pretrained(config.model_name)
-    tokenizer.pad_token = tokenizer.eos_token
-
-    rank_model = AutoPeftModelForSequenceClassification.from_pretrained(
-        "Holarissun/trl_rm_tldr_gptj",
-        num_labels=1,
+    rank_model = AutoModelForSequenceClassification.from_pretrained(
+        "weqweasdas/hh_rlhf_rm_open_llama_3b",
         output_attentions=True,
         return_dict_in_generate=True,
         attn_implementation="eager",
-    ).to("cuda:0")
-    print(type(rank_model))
-    rank_tokenizer = AutoTokenizer.from_pretrained("Holarissun/trl_rm_tldr_gptj")
-    rank_tokenizer.pad_token = rank_tokenizer.eos_token
-    rank_model.config.pad_token_id = rank_model.config.eos_token_id
+        device_map="cuda:0",
+    )
+    rank_tokenizer = LlamaTokenizer.from_pretrained(
+        "weqweasdas/hh_rlhf_rm_open_llama_3b", use_fast=False
+    )
 
+    # need to reset stream handler after loading hf models
     logging.getLogger().handlers[0].setLevel(logging.WARNING)
 
     ppo_trainer = PPOTrainerABC(
@@ -190,36 +161,30 @@ def main(
     logger.info(f"PPO lpi: {ppo_trainer.accelerator.local_process_index}")
     logger.info(f"RM device: {rank_model.device}")
 
-    print(f"PPO trainer device: {ppo_trainer.accelerator.device}")
-    print(f"PPO lpi: {ppo_trainer.accelerator.local_process_index}")
-
-    output_min_length = min_generation
-    output_max_length = max_generation
-    LengthSampler(output_min_length, output_max_length)
-
-    local_res = []
     generation_kwargs = {
         "min_length": -1,
         "top_k": 0.0,
         "top_p": 1.0,
         "do_sample": True,
-        "pad_token_id": tokenizer.eos_token_id,
         "return_dict_in_generate": True,
-        "batch_size": 8,
+        "batch_size": batch_size,
+        "pad_token_id": tokenizer.pad_token_id,
+        "repetition_penalty": repetition_penalty,
+        "max_new_tokens": max_generation,
+        "min_new_tokens": min_generation,
     }
+
+    local_res = []
 
     for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
         query_tensors = batch["input_ids"]
-        start = time.time()
-        #### Get response from gpt2
+        rm_query_tensors = batch["rm_input_ids"]
+
         response_tensors = []
         response_attentions = []
+        start = time.time()
         for query in query_tensors:
-            gen_len = max_generation
-            generation_kwargs["max_new_tokens"] = gen_len
-            generation_kwargs["min_new_tokens"] = min_generation
             response = ppo_trainer.generate(query, **generation_kwargs)
-
             response_tensors.append(response[0].squeeze()[len(query) :])
             response_attentions.append(response.attentions)
 
@@ -227,28 +192,23 @@ def main(
         logger.debug(f'First response: {batch["response"][0]}')
         end = time.time()
         logger.info(f"Generation time: {round(end - start,1)}s")
-        #### Compute sentiment score
-        with torch.no_grad():
-            start = time.time()
-            texts = [q + r for q, r in zip(batch["query"], batch["response"])]
-            print(
-                len(batch["query"][0]) / 4,
-                len(batch["response"][0]) / 4,
-                len(texts[0]) / 4,
-            )
-            print("example case now: \n\n\n", texts[0])
 
+        #### Compute Reward
+        start = time.time()
+        with torch.no_grad():
+            texts = [q + r for q, r in zip(batch["rm_query"], batch["response"])]
+            logger.debug(f"First RM input: {texts[0]}")
             inputs = rank_tokenizer(
                 texts,
                 return_tensors="pt",
-                max_length=512,
+                max_length=max_instruction_length + max_generation,
                 padding="max_length",
                 truncation=True,
-            ).to("cuda:0")
-
+            ).to(rank_model.device)
             out = rank_model(**inputs)
         end = time.time()
         logger.info(f"RM Inference time: {round(end - start,1)}s")
+
         start = time.time()
         rewards = []
 
@@ -259,8 +219,8 @@ def main(
         else:
             attention = [None] * len(response_tensors)
 
-        for out, response, query, attention in zip(
-            out.logits, response_tensors, query_tensors, attention
+        for out, response, query, attention, rm_query in zip(
+            out.logits, response_tensors, query_tensors, attention, rm_query_tensors
         ):
             total = out.detach()
             reward = torch.zeros_like(response, dtype=float)
@@ -272,7 +232,7 @@ def main(
                 reward[-1] = (1 - beta) * total
                 redist_reward = (
                     torch.tensor(
-                        get_attention_distribution(response, query, attention.cpu()),
+                        get_attention_distribution(response, rm_query, attention),
                         device=reward.device,
                     )
                     * total.to(reward.device)
@@ -308,13 +268,29 @@ def main(
                 )
                 reward += redist_reward
 
+            elif method == "rpibc_deep":
+                reward[-1] = (1 - beta) * total
+                dists = get_rpi_deep_attention_distribution_batch_llama(
+                    rank_model,
+                    inputs,
+                    [response],
+                    [query],
+                    num_time_steps=rpi_time_steps,
+                    num_interpolation=rpi_num_interpolation,
+                    num_samples=rpi_num_samples,
+                )
+                redist_reward = torch.tensor(dists[0], device=reward.device) * total * beta
+                reward += redist_reward
+
             elif method == "uniform":
                 reward += total / len(reward)
+
             rewards.append(reward)
+
         end = time.time()
         logger.info(f"Reward calculation time: {round(end - start,1)}s")
-        #### Run PPO step
 
+        #### Run PPO step
         start = time.time()
         stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
         end = time.time()
@@ -335,24 +311,41 @@ def main(
         local_res.append(stats)
         torch.save(local_res, LOG_DIRECTORY + "/local_res.th")
 
+        if epoch % 100 == 0:
+            ppo_trainer.save_pretrained(
+                f"{BASE_PATH}/experiments/saved_models/{run_name}"
+            )
+
         if epoch >= max_epochs:
             break
+
+    ppo_trainer.save_pretrained(f"{BASE_PATH}/experiments/saved_models/{run_name}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--method", type=str, default="rlhf")
-    parser.add_argument("--max_epochs", type=int, default=1000)
+    parser.add_argument("--method", type=str, default="abc")
+    parser.add_argument("--max_epochs", type=int, default=2)
     parser.add_argument("--beta", type=float, default=0.8)
-    parser.add_argument("--l_rate", type=float, default=1.41e-6)
-    parser.add_argument("--min_generation", type=int, default=8)
-    parser.add_argument("--max_generation", type=int, default=48)
-    parser.add_argument("--project_name", type=str, default="rlhf-tldr-gptj")
-    parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--seed", type=int, default=41310)
+    parser.add_argument("--l_rate", type=float, default=3e-5)
     parser.add_argument("--lora_rank", type=int, default=32)
     parser.add_argument("--lora_alpha", type=int, default=32)
     parser.add_argument("--lora_dropout", type=float, default=0.0)
+    parser.add_argument("--min_generation", type=int, default=8)
+    parser.add_argument("--max_generation", type=int, default=256)
+    parser.add_argument("--ppo_epochs", type=int, default=10)
+    parser.add_argument("--use_score_scaling", type=bool, default=False)
+    parser.add_argument("--use_score_nomalization", type=bool, default=False)
+    parser.add_argument("--repetition_penalty", type=float, default=1.0)
+    parser.add_argument("--max_instruction_length", type=int, default=256)
+    parser.add_argument("--project_name", type=str, default="openllama")
+    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--mini_batch_size", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=41311)
+    parser.add_argument("--logging_level", type=str, default="DEBUG")
+    parser.add_argument("--rpi_time_steps", type=int, default=5)
+    parser.add_argument("--rpi_num_interpolation", type=int, default=5)
+    parser.add_argument("--rpi_num_samples", type=int, default=1)
 
     args = parser.parse_args()
 

@@ -1,3 +1,9 @@
+"""
+RPIBC Hyperparameter Sweep on IMDb.
+This is a standalone script that mirrors rlhf_imdb.py but adds RPI-specific
+hyperparameter arguments (rpi_time_steps, rpi_num_interpolation, rpi_num_samples).
+The method is always 'rpibc'. Run names encode the config: rpibc_T{T}_K{K}_S{S}.
+"""
 import argparse
 import datetime
 import os
@@ -13,32 +19,18 @@ from trl import AutoModelForCausalLMWithValueHead, PPOConfig
 from trl.core import LengthSampler
 
 import wandb
-from abcrl.attention.redistribution import (
-    get_attention_distribution, get_generator_attention_distribution, get_rpi_attention_distribution_batch)
+from abcrl.attention.redistribution import get_rpi_attention_distribution_batch
 from abcrl.rl.ppo import PPOTrainerABC
 
 
 def build_dataset(
     config, dataset_name="imdb", input_min_text_length=2, input_max_text_length=8
 ):
-    """
-    Build dataset for training.
-
-    Args:
-        dataset_name (`str`):
-            The name of the dataset to be loaded.
-
-    Returns:
-        dataloader (`torch.utils.data.DataLoader`):
-            The dataloader for the dataset.
-    """
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)
     tokenizer.pad_token = tokenizer.eos_token
-    # load imdb with datasets
     ds = load_dataset(dataset_name, split="train")
     ds = ds.rename_columns({"text": "review"})
     ds = ds.filter(lambda x: len(x["review"]) > 200, batched=False)
-
     input_size = LengthSampler(input_min_text_length, input_max_text_length)
 
     def tokenize(sample):
@@ -56,17 +48,20 @@ def collator(data):
 
 
 def main(
-    method: str = "abc",
-    max_epochs: int = 50,
-    beta: float = 0.5,
+    max_epochs: int = 150,
+    beta: float = 0.8,
     l_rate: float = 1.41e-5,
     min_generation: int = 8,
     max_generation: int = 16,
-    project_name: str = "rlhf",
+    project_name: str = "rlhf_imdb_rpi_sweep",
     batch_size: int = 16,
-    seed: int = 41310,
+    seed: int = 1,
+    # RPI hyperparameters
+    rpi_time_steps: int = 10,
+    rpi_num_interpolation: int = 5,
+    rpi_num_samples: int = 1,
 ):
-    assert method in ["rlhf", "abc", "abcde", "abcde2", "uniform", "rpibc"]
+    method = "rpibc"
 
     if seed is not None:
         print(f"Setting seed to {seed}")
@@ -75,13 +70,15 @@ def main(
     now = datetime.datetime.now()
     date_time = now.strftime("%Y%m%d_%H%M")
 
-    run_name = f"{method}_{int(beta*100)}_{min_generation}_{max_generation}_{date_time}"
+    # Encode hyperparams in run name for easy identification
+    config_tag = f"T{rpi_time_steps}_K{rpi_num_interpolation}_S{rpi_num_samples}"
+    run_name = f"{method}_{config_tag}_{int(beta*100)}_{min_generation}_{max_generation}_{date_time}"
 
     print(f"Run name: {run_name}")
+    print(f"RPI config: time_steps={rpi_time_steps}, num_interpolation={rpi_num_interpolation}, num_samples={rpi_num_samples}")
 
     load_dotenv()
     wandb_entity = os.getenv("WANDB_ENTITY")
-
     wandb.init(**{"project": project_name, "name": run_name, "entity": f"{wandb_entity}"})
 
     config = PPOConfig(
@@ -98,13 +95,13 @@ def main(
     model = AutoModelForCausalLMWithValueHead.from_pretrained(config.model_name)
     ref_model = AutoModelForCausalLMWithValueHead.from_pretrained(config.model_name)
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)
-
     tokenizer.pad_token = tokenizer.eos_token
 
     reward_name = "XanderJC/gpt2-rm-imdb"
-    rank_model, rank_tokenizer = AutoModelForSequenceClassification.from_pretrained(
+    rank_model = AutoModelForSequenceClassification.from_pretrained(
         reward_name, output_attentions=True
-    ), AutoTokenizer.from_pretrained(reward_name)
+    )
+    rank_tokenizer = AutoTokenizer.from_pretrained(reward_name)
     rank_model.config.pad_token_id = rank_model.config.eos_token_id
 
     ppo_trainer = PPOTrainerABC(
@@ -116,9 +113,7 @@ def main(
         data_collator=collator,
     )
 
-    output_min_length = min_generation
-    output_max_length = max_generation
-    output_length_sampler = LengthSampler(output_min_length, output_max_length)
+    output_length_sampler = LengthSampler(min_generation, max_generation)
 
     generation_kwargs = {
         "min_length": -1,
@@ -135,7 +130,6 @@ def main(
     for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
         query_tensors = batch["input_ids"]
 
-        #### Get response from gpt2
         response_tensors = []
         response_attentions = []
         for query in query_tensors:
@@ -148,91 +142,37 @@ def main(
 
         batch["response"] = [tokenizer.decode(r.squeeze()) for r in response_tensors]
 
-        #### Compute sentiment score
         texts = [q + r for q, r in zip(batch["query"], batch["response"])]
-
-        inputs = rank_tokenizer(
-            texts, return_tensors="pt", padding=True, truncation=True
-        )
+        inputs = rank_tokenizer(texts, return_tensors="pt", padding=True, truncation=True)
         out = rank_model(**inputs)
 
-        rewards = []
-        if method == "abc":
-            attention = out.attentions[-1].mean(1)  # last layer averaged over heads
-        elif method == "abcde" or method == "abcde2":
-            attention = response_attentions
-        elif method == "rpibc":
-            attention = out.attentions[-1]
-            rpibc_distributions = get_rpi_attention_distribution_batch(
-                rank_model, inputs, response_tensors, query_tensors, out.attentions[-1]
-            )
-        else:
-            attention = [None] * len(response_tensors)
+        rpibc_distributions = get_rpi_attention_distribution_batch(
+            rank_model,
+            inputs,
+            response_tensors,
+            query_tensors,
+            out.attentions[-1],
+            num_time_steps=rpi_time_steps,
+            num_interpolation=rpi_num_interpolation,
+            num_samples=rpi_num_samples,
+        )
+        attention = out.attentions[-1]
 
+        rewards = []
         for i, (logit, response, query, att) in enumerate(zip(
             out.logits, response_tensors, query_tensors, attention
         )):
             total = (logit[1] - logit[0]).detach()
             reward = torch.zeros_like(response, dtype=float)
-
-            if method == "rlhf":
-                reward[-1] = total
-
-            elif method == "abc":
-                reward[-1] = (1 - beta) * total
-                redist_reward = (
-                    torch.tensor(
-                        get_attention_distribution(response, query, att),
-                        device=reward.device,
-                    )
-                    * total
-                    * beta
-                )
-                reward += redist_reward
-
-            elif method == "abcde":
-                reward[-1] = (1 - beta) * total
-                redist_reward = (
-                    torch.tensor(
-                        get_generator_attention_distribution(
-                            response, query, att, False
-                        ),
-                        device=reward.device,
-                    )
-                    * total
-                    * beta
-                )
-                reward += redist_reward
-
-            elif method == "abcde2":
-                reward[-1] = (1 - beta) * total
-                redist_reward = (
-                    torch.tensor(
-                        get_generator_attention_distribution(
-                            response, query, att, True
-                        ),
-                        device=reward.device,
-                    )
-                    * total
-                    * beta
-                )
-                reward += redist_reward
-
-            elif method == "rpibc":
-                reward[-1] = (1 - beta) * total
-                redist_reward = (
-                    rpibc_distributions[i].to(reward.device)
-                    * total
-                    * beta
-                )
-                reward += redist_reward
-
-            elif method == "uniform":
-                reward += total / len(reward)
-
+            reward[-1] = (1 - beta) * total
+            redist_reward = (
+                rpibc_distributions[i].to(reward.device)
+                * total
+                * beta
+            )
+            reward += redist_reward
             rewards.append(reward)
 
-        #### Run PPO step
         stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
         og_rewards = [score.sum() for score in rewards]
         ppo_trainer.log_stats(stats, batch, og_rewards)
@@ -242,13 +182,11 @@ def main(
 
         all_rewards.append(torch.tensor(og_rewards).mean().item())
 
-    # Save results locally
+    # Save results
     results_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../results/numerics"))
     results_path = os.path.join(results_dir, f"IMDb_{run_name}.pkl")
-    
     try:
         os.makedirs(results_dir, exist_ok=True)
-        # Save as a dict to match expected format: {run_name: rewards}
         with open(results_path, "wb") as f:
             pickle.dump({run_name: all_rewards}, f)
         print(f"Saved results to {results_path}")
@@ -258,16 +196,21 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--method", type=str, default="abc")
-    parser.add_argument("--max_epochs", type=int, default=500)
-    parser.add_argument("--beta", type=float, default=0.5)
+    parser.add_argument("--max_epochs", type=int, default=150)
+    parser.add_argument("--beta", type=float, default=0.8)
     parser.add_argument("--l_rate", type=float, default=1.41e-5)
     parser.add_argument("--min_generation", type=int, default=8)
     parser.add_argument("--max_generation", type=int, default=16)
-    parser.add_argument("--project_name", type=str, default="rlhf")
-    parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--project_name", type=str, default="rlhf_imdb_rpi_sweep")
+    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--seed", type=int, default=1)
+    # RPI-specific hyperparameters
+    parser.add_argument("--rpi_time_steps", type=int, default=10,
+                        help="Diffusion time steps T (noise level of baseline)")
+    parser.add_argument("--rpi_num_interpolation", type=int, default=5,
+                        help="Number of interpolation steps K (accuracy of attribution)")
+    parser.add_argument("--rpi_num_samples", type=int, default=1,
+                        help="Number of noise samples S (variance reduction)")
 
     args = parser.parse_args()
-
     main(**args.__dict__)
