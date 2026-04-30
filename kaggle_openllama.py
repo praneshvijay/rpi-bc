@@ -48,6 +48,7 @@ main(
     rpi_num_samples=1,
     project_name="rlhf-openllama-rpi-deep-kaggle",
     logging_level="WARNING",
+    reward_model_half=True,
 )
 
 # ── Save results ────────────────────────────────────────────

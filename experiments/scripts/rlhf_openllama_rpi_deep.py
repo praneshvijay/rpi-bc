@@ -45,6 +45,7 @@ def main(
     rpi_time_steps: int = 5,
     rpi_num_interpolation: int = 5,
     rpi_num_samples: int = 1,
+    reward_model_half: bool = False,
 ):
     now = datetime.datetime.now()
     date_time = now.strftime("%Y%m%d_%H%M")
@@ -138,12 +139,16 @@ def main(
     )
     tokenizer = LlamaTokenizer.from_pretrained(config.model_name, use_fast=False)
 
-    rank_model = AutoModelForSequenceClassification.from_pretrained(
-        "weqweasdas/hh_rlhf_rm_open_llama_3b",
+    rm_kwargs = dict(
         output_attentions=True,
         return_dict_in_generate=True,
         attn_implementation="eager",
         device_map="cuda:0",
+    )
+    if reward_model_half:
+        rm_kwargs["torch_dtype"] = torch.float16
+    rank_model = AutoModelForSequenceClassification.from_pretrained(
+        "weqweasdas/hh_rlhf_rm_open_llama_3b", **rm_kwargs
     )
     rank_tokenizer = LlamaTokenizer.from_pretrained(
         "weqweasdas/hh_rlhf_rm_open_llama_3b", use_fast=False
