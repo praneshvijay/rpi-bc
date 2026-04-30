@@ -47,6 +47,7 @@ main(
     rpi_num_samples=1,
     project_name="rlhf-tldr-rpi-deep-kaggle",
     logging_level="WARNING",
+    reward_model_8bit=True,
 )
 
 # ── Copy results ────────────────────────────────────────────

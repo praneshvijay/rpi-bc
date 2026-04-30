@@ -76,6 +76,7 @@ def main(
     rpi_num_samples: int = 1,
     project_name: str = "rlhf-tldr-rpi-deep",
     logging_level: str = "WARNING",
+    reward_model_8bit: bool = False,
 ):
     now = datetime.datetime.now()
     date_time = now.strftime("%Y%m%d_%H%M")
@@ -154,13 +155,21 @@ def main(
     tokenizer.pad_token = tokenizer.eos_token
 
     # Reward model — GPT-J fine-tuned for summarization quality
-    rank_model = AutoPeftModelForSequenceClassification.from_pretrained(
-        "Holarissun/trl_rm_tldr_gptj",
+    rm_kwargs = dict(
         num_labels=1,
         output_attentions=True,
         return_dict_in_generate=True,
         attn_implementation="eager",
-    ).to("cuda:0")
+    )
+    if reward_model_8bit:
+        rm_kwargs["load_in_8bit"] = True
+        rank_model = AutoPeftModelForSequenceClassification.from_pretrained(
+            "Holarissun/trl_rm_tldr_gptj", **rm_kwargs
+        )
+    else:
+        rank_model = AutoPeftModelForSequenceClassification.from_pretrained(
+            "Holarissun/trl_rm_tldr_gptj", **rm_kwargs
+        ).to("cuda:0")
     rank_tokenizer = AutoTokenizer.from_pretrained("Holarissun/trl_rm_tldr_gptj")
     rank_tokenizer.pad_token = rank_tokenizer.eos_token
     rank_model.config.pad_token_id = rank_model.config.eos_token_id
