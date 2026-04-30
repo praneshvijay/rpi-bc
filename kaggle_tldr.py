@@ -39,6 +39,7 @@ main(
     beta=0.8,
     l_rate=1.41e-6,
     batch_size=1,
+    mini_batch_size=1,
     min_generation=8,
     max_generation=48,
     rpi_time_steps=5,

@@ -66,6 +66,7 @@ def main(
     min_generation: int = 8,
     max_generation: int = 48,
     batch_size: int = 4,
+    mini_batch_size: int = 1,
     seed: int = 1,
     lora_rank: int = 32,
     lora_alpha: int = 32,
@@ -119,6 +120,7 @@ def main(
         log_with="wandb",
         ppo_epochs=4,
         batch_size=batch_size,
+        mini_batch_size=mini_batch_size,
         optimize_device_cache=True,
         seed=seed,
     )
@@ -264,6 +266,7 @@ if __name__ == "__main__":
     parser.add_argument("--beta", type=float, default=0.8)
     parser.add_argument("--l_rate", type=float, default=1.41e-6)
     parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--mini_batch_size", type=int, default=1)
     parser.add_argument("--min_generation", type=int, default=8)
     parser.add_argument("--max_generation", type=int, default=48)
     parser.add_argument("--rpi_time_steps", type=int, default=5)
