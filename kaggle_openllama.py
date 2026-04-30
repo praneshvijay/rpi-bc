@@ -5,8 +5,9 @@ GPU: T4 x2 | Estimated time: 8-12 hours
 """
 import subprocess, sys, os
 
-# ── Install compatible deps (DO NOT touch torch — Kaggle has CUDA version) ──
-subprocess.check_call([sys.executable, "-m", "pip", "install", "-q",
+# ── CRITICAL: Uninstall Kaggle's pre-installed peft first, then install compatible versions ──
+subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", "peft", "trl", "transformers", "accelerate"])
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "--no-cache-dir",
     "transformers==4.38.2", "peft==0.8.2", "trl==0.7.11",
     "accelerate==0.27.2", "bitsandbytes", "datasets==2.15.0",
     "wandb", "python-dotenv"])
@@ -50,8 +51,7 @@ main(
 )
 
 # ── Save results ────────────────────────────────────────────
-import pickle, numpy as np
-
+import pickle
 logs_dir = "/kaggle/working/rpi-bc/experiments/logs/"
 if os.path.exists(logs_dir):
     for d in os.listdir(logs_dir):
@@ -64,5 +64,4 @@ if os.path.exists(logs_dir):
                 with open(out_path, "wb") as f:
                     pickle.dump({"rpibc_deep_seed1": rewards}, f)
                 print(f"Saved: {out_path}")
-
-print("\n✅ OpenLLaMA training complete! Download .pkl from Output tab.")
+print("\n✅ OpenLLaMA training complete!")
